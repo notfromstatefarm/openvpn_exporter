@@ -58,24 +58,25 @@ func getGeo(address string) (GeoIP, error) {
 		return val, nil
 	}
 
+	fmt.Printf("Resolving %s\n", address)
+
 	response, err := http.Get("https://freegeoip.live/json/" + address)
 	if err != nil {
-		fmt.Println(err)
 		return geo, err
 	}
 	defer response.Body.Close()
 
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		fmt.Println(err)
 		return geo, err
 	}
 
 	err = json.Unmarshal(body, &geo)
 	if err != nil {
-		fmt.Println(err)
 		return geo, err
 	}
+
+	geoCache[address] = geo
 
 	return geo, nil
 }
@@ -292,7 +293,7 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 					ip := strings.Split(columnValues["real_address"], ":")[0]
 					geo, err := getGeo(ip)
 					if err != nil {
-						log.Printf("Error resolving GeoIP: %v", err)
+						log.Printf("Error resolving GeoIP: %v\n", err)
 					} else {
 						columnValues["lat"] = fmt.Sprintf("%f", geo.Lat)
 						columnValues["lon"] = fmt.Sprintf("%f", geo.Lon)
