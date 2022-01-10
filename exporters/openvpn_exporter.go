@@ -58,7 +58,7 @@ func getGeo(address string) (GeoIP, error) {
 		return val, nil
 	}
 
-	fmt.Printf("Resolving %s\n", address)
+	log.Printf("Resolving %s", address)
 
 	response, err := http.Get("https://freegeoip.live/json/" + address)
 	if err != nil {
