@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"io/ioutil"
 	"encoding/json"
+	"math"
 )
 
 type OpenvpnServerHeader struct {
@@ -34,7 +35,6 @@ type OpenVPNExporter struct {
 	openvpnConnectedClientsDesc *prometheus.Desc
 	openvpnClientDescs          map[string]*prometheus.Desc
 	openvpnServerHeaders        map[string]OpenvpnServerHeader
-	geoIp                       bool
 }
 
 type GeoIP struct {
@@ -81,7 +81,7 @@ func getGeo(address string) (GeoIP, error) {
 	return geo, nil
 }
 
-func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool, geoIp bool) (*OpenVPNExporter, error) {
+func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNExporter, error) {
 	// Metrics exported both for client and server statistics.
 	openvpnUpDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "up"),
@@ -148,18 +148,10 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool, geoIp bool
 		serverHeaderRoutingLabels = []string{"status_path", "common_name"}
 		serverHeaderRoutingLabelColumns = []string{"Common Name"}
 	} else {
-		if geoIp {
-			serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
-			serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
-			serverHeaderRoutingLabels = []string{"status_path", "common_name", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
-			serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
-		} else {
-			serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username"}
-			serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username"}
-			serverHeaderRoutingLabels = []string{"status_path", "common_name", "real_address", "virtual_address"}
-			serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address"}
-		}
-
+		serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
+		serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
+		serverHeaderRoutingLabels = []string{"status_path", "common_name", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
+		serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
 	}
 
 	openvpnServerHeaders := map[string]OpenvpnServerHeader{
@@ -181,6 +173,14 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool, geoIp bool
 						"Amount of data sent over a connection on the VPN server, in bytes.",
 						serverHeaderClientLabels, nil),
 					ValueType: prometheus.CounterValue,
+				},
+				{
+					Column: "Distance From Server",
+					Desc: prometheus.NewDesc(
+						prometheus.BuildFQName("openvpn", "server", "client_distance"),
+						"Distance from server to client in kilometers",
+						serverHeaderClientLabels, nil),
+					ValueType: prometheus.GaugeValue,
 				},
 			},
 		},
@@ -206,7 +206,6 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool, geoIp bool
 		openvpnConnectedClientsDesc: openvpnConnectedClientsDesc,
 		openvpnClientDescs:          openvpnClientDescs,
 		openvpnServerHeaders:        openvpnServerHeaders,
-		geoIp:                       geoIp,
 	}, nil
 }
 
@@ -288,30 +287,47 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 			}
 
 
-			if e.geoIp {
-				if columnValues["Real Address"] != "" {
-					ip := strings.Split(columnValues["Real Address"], ":")[0]
-					geo, err := getGeo(ip)
-					if err != nil {
-						log.Printf("Error resolving GeoIP: %v\n", err)
+			if columnValues["Real Address"] != "" {
+				ip := strings.Split(columnValues["Real Address"], ":")[0]
+				geo, err := getGeo(ip)
+				if err != nil {
+					log.Printf("Error resolving GeoIP: %v", err)
+				} else {
+					columnValues["Latitude"] = fmt.Sprintf("%f", geo.Lat)
+					columnValues["Longitude"] = fmt.Sprintf("%f", geo.Lon)
+					if geo.City != "" {
+						columnValues["City"] = geo.City
 					} else {
-						columnValues["Latitude"] = fmt.Sprintf("%f", geo.Lat)
-						columnValues["Longitude"] = fmt.Sprintf("%f", geo.Lon)
-						if geo.City != "" {
-							columnValues["City"] = geo.City
-						} else {
-							columnValues["City"] = "Unknown"
-						}
-						if geo.RegionName != "" {
-							columnValues["Region"] = geo.RegionName
-						} else {
-							columnValues["Region"] = "Unknown"
-						}
-						if geo.CountryName != "" {
-							columnValues["Country"] = geo.CountryName
-						} else {
-							columnValues["Country"] = "Unknown"
-						}
+						columnValues["City"] = "Unknown"
+					}
+					if geo.RegionName != "" {
+						columnValues["Region"] = geo.RegionName
+					} else {
+						columnValues["Region"] = "Unknown"
+					}
+					if geo.CountryName != "" {
+						columnValues["Country"] = geo.CountryName
+					} else {
+						columnValues["Country"] = "Unknown"
+					}
+					// calculate distance
+					// get our geo (blank returns our info)
+					serverGeo, err := getGeo("")
+					if err != nil {
+						log.Printf("Error resolving server GeoIP: %v", err)
+					} else {
+						p := math.Pi / 180
+						clientLat := float64(geo.Lat)
+						clientLon := float64(geo.Lon)
+						serverLat := float64(serverGeo.Lat)
+						serverLon := float64(serverGeo.Lon)
+
+						var a = 0.5 - math.Cos((serverLat - clientLat) * p)/2 + 
+								math.Cos(clientLat * p) * math.Cos(serverLat * p) * 
+								(1 - math.Cos((serverLon - clientLon) * p))/2;
+						
+						distance := 12742 * math.Asin(math.Sqrt(a));
+						columnValues["Distance From Server"] = fmt.Sprintf("%f", distance)
 					}
 				}
 			}
@@ -340,6 +356,7 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 						log.Printf("Metric entry with same labels: %s, %s", metric.Column, labels)
 					}
 				}
+				
 			}
 		} else {
 			return fmt.Errorf("unsupported key: %q", fields[0])
