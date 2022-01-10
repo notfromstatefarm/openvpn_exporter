@@ -40,7 +40,7 @@ type OpenVPNExporter struct {
 type GeoIP struct {
 	Ip          string  `json:""`
 	CountryCode string  `json:"country_code"`
-	CountryName string  `json:""`
+	CountryName string  `json:"country_name"`
 	RegionCode  string  `json:"region_code"`
 	RegionName  string  `json:"region_name"`
 	City        string  `json:"city"`
@@ -297,9 +297,21 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 					} else {
 						columnValues["Latitude"] = fmt.Sprintf("%f", geo.Lat)
 						columnValues["Longitude"] = fmt.Sprintf("%f", geo.Lon)
-						columnValues["City"] = geo.City
-						columnValues["Region"] = geo.RegionName
-						columnValues["Country"] = geo.CountryName
+						if geo.City != "" {
+							columnValues["City"] = geo.City
+						} else {
+							columnValues["City"] = "Unknown"
+						}
+						if geo.RegionName != "" {
+							columnValues["Region"] = geo.RegionName
+						} else {
+							columnValues["Region"] = "Unknown"
+						}
+						if geo.CountryName != "" {
+							columnValues["Country"] = geo.CountryName
+						} else {
+							columnValues["Country"] = "Unknown"
+						}
 					}
 				}
 			}
