@@ -289,17 +289,17 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 
 
 			if e.geoIp {
-				if columnValues["real_address"] != "" {
-					ip := strings.Split(columnValues["real_address"], ":")[0]
+				if columnValues["Real Address"] != "" {
+					ip := strings.Split(columnValues["Real Address"], ":")[0]
 					geo, err := getGeo(ip)
 					if err != nil {
 						log.Printf("Error resolving GeoIP: %v\n", err)
 					} else {
-						columnValues["lat"] = fmt.Sprintf("%f", geo.Lat)
-						columnValues["lon"] = fmt.Sprintf("%f", geo.Lon)
-						columnValues["city"] = geo.City
-						columnValues["region"] = geo.RegionName
-						columnValues["country"] = geo.CountryName
+						columnValues["Latitude"] = fmt.Sprintf("%f", geo.Lat)
+						columnValues["Longitude"] = fmt.Sprintf("%f", geo.Lon)
+						columnValues["City"] = geo.City
+						columnValues["Region"] = geo.RegionName
+						columnValues["Country"] = geo.CountryName
 					}
 				}
 			}
