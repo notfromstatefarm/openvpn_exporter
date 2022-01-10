@@ -15,7 +15,7 @@ package main
 
 import (
 	"flag"
-	"github.com/kumina/openvpn_exporter/exporters"
+	"github.com/notfromstatefarm/openvpn_exporter/exporters"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"log"
@@ -29,6 +29,7 @@ func main() {
 		metricsPath        = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
 		openvpnStatusPaths = flag.String("openvpn.status_paths", "examples/client.status,examples/server2.status,examples/server3.status", "Paths at which OpenVPN places its status files.")
 		ignoreIndividuals  = flag.Bool("ignore.individuals", false, "If ignoring metrics for individuals")
+		geoIp              = flag.Bool("geoip", false, "Should metrics with client addresses have their geoIP info resolved")
 	)
 	flag.Parse()
 
@@ -37,8 +38,9 @@ func main() {
 	log.Printf("Metrics path: %v\n", *metricsPath)
 	log.Printf("openvpn.status_path: %v\n", *openvpnStatusPaths)
 	log.Printf("Ignore Individuals: %v\n", *ignoreIndividuals)
+	log.Printf("Resolve GeoIP: %v\n", *geoIp)
 
-	exporter, err := exporters.NewOpenVPNExporter(strings.Split(*openvpnStatusPaths, ","), *ignoreIndividuals)
+	exporter, err := exporters.NewOpenVPNExporter(strings.Split(*openvpnStatusPaths, ","), *ignoreIndividuals, *geoIp)
 	if err != nil {
 		panic(err)
 	}

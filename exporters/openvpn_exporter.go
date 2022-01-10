@@ -11,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"net/http"
+	"io/ioutil"
+	"encoding/json"
 )
 
 type OpenvpnServerHeader struct {
@@ -31,9 +34,53 @@ type OpenVPNExporter struct {
 	openvpnConnectedClientsDesc *prometheus.Desc
 	openvpnClientDescs          map[string]*prometheus.Desc
 	openvpnServerHeaders        map[string]OpenvpnServerHeader
+	geoIp                       bool
 }
 
-func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNExporter, error) {
+type GeoIP struct {
+	Ip          string  `json:""`
+	CountryCode string  `json:"country_code"`
+	CountryName string  `json:""`
+	RegionCode  string  `json:"region_code"`
+	RegionName  string  `json:"region_name"`
+	City        string  `json:"city"`
+	Zipcode     string  `json:"zipcode"`
+	Lat         float32 `json:"latitude"`
+	Lon         float32 `json:"longitude"`
+	MetroCode   int     `json:"metro_code"`
+	AreaCode    int     `json:"area_code"`
+}
+var geoCache = map[string]GeoIP{}
+
+func getGeo(address string) (GeoIP, error) {
+	geo := GeoIP{}
+	if val, ok := geoCache[address]; ok {
+		return val, nil
+	}
+
+	response, err := http.Get("https://freegeoip.live/json/" + address)
+	if err != nil {
+		fmt.Println(err)
+		return geo, err
+	}
+	defer response.Body.Close()
+
+	body, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		fmt.Println(err)
+		return geo, err
+	}
+
+	err = json.Unmarshal(body, &geo)
+	if err != nil {
+		fmt.Println(err)
+		return geo, err
+	}
+
+	return geo, nil
+}
+
+func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool, geoIp bool) (*OpenVPNExporter, error) {
 	// Metrics exported both for client and server statistics.
 	openvpnUpDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "up"),
@@ -100,10 +147,18 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNE
 		serverHeaderRoutingLabels = []string{"status_path", "common_name"}
 		serverHeaderRoutingLabelColumns = []string{"Common Name"}
 	} else {
-		serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username"}
-		serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username"}
-		serverHeaderRoutingLabels = []string{"status_path", "common_name", "real_address", "virtual_address"}
-		serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address"}
+		if geoIp {
+			serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
+			serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
+			serverHeaderRoutingLabels = []string{"status_path", "common_name", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
+			serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
+		} else {
+			serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username"}
+			serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username"}
+			serverHeaderRoutingLabels = []string{"status_path", "common_name", "real_address", "virtual_address"}
+			serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address"}
+		}
+
 	}
 
 	openvpnServerHeaders := map[string]OpenvpnServerHeader{
@@ -150,6 +205,7 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNE
 		openvpnConnectedClientsDesc: openvpnConnectedClientsDesc,
 		openvpnClientDescs:          openvpnClientDescs,
 		openvpnServerHeaders:        openvpnServerHeaders,
+		geoIp:                       geoIp,
 	}, nil
 }
 
@@ -228,6 +284,23 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 			}
 			for i, column := range columnNames {
 				columnValues[column] = fields[i+1]
+			}
+
+
+			if e.geoIp {
+				if columnValues["real_address"] != "" {
+					ip := strings.Split(columnValues["real_address"], ":")[0]
+					geo, err := getGeo(ip)
+					if err != nil {
+						log.Printf("Error resolving GeoIP: %v", err)
+					} else {
+						columnValues["lat"] = fmt.Sprintf("%f", geo.Lat)
+						columnValues["lon"] = fmt.Sprintf("%f", geo.Lon)
+						columnValues["city"] = geo.City
+						columnValues["region"] = geo.RegionName
+						columnValues["country"] = geo.CountryName
+					}
+				}
 			}
 
 			// Extract columns that should act as entry labels.
