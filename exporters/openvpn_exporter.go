@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"github.com/mmcloughlin/geohash"
 )
 
 type OpenvpnServerHeader struct {
@@ -43,6 +44,7 @@ type GeoIP struct {
 	City        string  `json:"city"`
 	Lat         float64 `json:"lat"`
 	Lon         float64 `json:"lon"`
+	Geohash     string
 }
 
 var geoCache = map[string]GeoIP{}
@@ -71,6 +73,8 @@ func getGeo(address string) (GeoIP, error) {
 		return geo, err
 	}
 
+	geo.Geohash = geohash.Encode(geo.Lat, geo.Lon)
+
 	geoCache[address] = geo
 
 	return geo, nil
@@ -81,22 +85,22 @@ func NewOpenVPNExporter(statusPath string) (*OpenVPNExporter, error) {
 	openvpnUpDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "up"),
 		"Whether scraping OpenVPN's metrics was successful.",
-		[]string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
+		[]string{"server_geohash", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
 	openvpnStatusUpdateTimeDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "status_update_time_seconds"),
 		"UNIX timestamp at which the OpenVPN statistics were updated.",
-		[]string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
+		[]string{"server_geohash", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
 
 	// Metrics specific to OpenVPN servers.
 	openvpnConnectedClientsDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "server_connected_clients"),
 		"Number Of Connected Clients",
-		[]string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
+		[]string{"server_geohash", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
 
-	serverHeaderClientLabels := []string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip", "common_name", "connection_time", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
-	serverHeaderClientLabelColumns := []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
-	serverHeaderRoutingLabels := []string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip", "common_name", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
-	serverHeaderRoutingLabelColumns := []string{"Common Name", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
+	serverHeaderClientLabels := []string{"server_geohash", "server_city", "server_country", "server_region", "server_public_ip", "common_name", "connection_time", "real_address", "virtual_address", "username", "geohash", "city", "country", "region"}
+	serverHeaderClientLabelColumns := []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username", "Geohash", "City", "Country", "Region"}
+	serverHeaderRoutingLabels := []string{"server_geohash", "server_city", "server_country", "server_region", "server_public_ip", "common_name", "real_address", "virtual_address", "username", "geohash", "city", "country", "region"}
+	serverHeaderRoutingLabelColumns := []string{"Common Name", "Real Address", "Virtual Address", "Username", "Geohash", "City", "Country", "Region"}
 
 	openvpnServerHeaders := map[string]OpenvpnServerHeader{
 		"CLIENT_LIST": {
@@ -227,8 +231,7 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(file io.Reader, ch chan<
 				e.openvpnStatusUpdateTimeDesc,
 				prometheus.GaugeValue,
 				timeStartStats,
-				fmt.Sprintf("%f", e.geoIP.Lat),
-				fmt.Sprintf("%f", e.geoIP.Lon),
+				e.geoIP.Geohash,
 				e.geoIP.City,
 				e.geoIP.CountryName,
 				e.geoIP.RegionName,
@@ -264,8 +267,7 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(file io.Reader, ch chan<
 				if err != nil {
 					log.Printf("Error resolving GeoIP: %v", err)
 				} else {
-					columnValues["Latitude"] = fmt.Sprintf("%f", geo.Lat)
-					columnValues["Longitude"] = fmt.Sprintf("%f", geo.Lon)
+					columnValues["Geohash"] = geo.Geohash
 					if geo.City != "" {
 						columnValues["City"] = geo.City
 					} else {
@@ -293,8 +295,7 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(file io.Reader, ch chan<
 			}
 
 			// Extract columns that should act as entry labels.
-			labels := []string{fmt.Sprintf("%f", e.geoIP.Lat),
-				fmt.Sprintf("%f", e.geoIP.Lon),
+			labels := []string{e.geoIP.Geohash,
 				e.geoIP.City,
 				e.geoIP.CountryName,
 				e.geoIP.RegionName,
@@ -332,8 +333,7 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(file io.Reader, ch chan<
 		e.openvpnConnectedClientsDesc,
 		prometheus.GaugeValue,
 		float64(numberConnectedClient),
-		fmt.Sprintf("%f", e.geoIP.Lat),
-		fmt.Sprintf("%f", e.geoIP.Lon),
+		e.geoIP.Geohash,
 		e.geoIP.City,
 		e.geoIP.CountryName,
 		e.geoIP.RegionName,
@@ -377,14 +377,12 @@ func (e *OpenVPNExporter) Describe(ch chan<- *prometheus.Desc) {
 
 func (e *OpenVPNExporter) Collect(ch chan<- prometheus.Metric) {
 	err := e.collectStatusFromFile(e.statusPath, ch)
-	//"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"
 	if err == nil {
 		ch <- prometheus.MustNewConstMetric(
 			e.openvpnUpDesc,
 			prometheus.GaugeValue,
 			1.0,
-			fmt.Sprintf("%f", e.geoIP.Lat),
-			fmt.Sprintf("%f", e.geoIP.Lon),
+			e.geoIP.Geohash,
 			e.geoIP.City,
 			e.geoIP.CountryName,
 			e.geoIP.RegionName,
@@ -395,8 +393,7 @@ func (e *OpenVPNExporter) Collect(ch chan<- prometheus.Metric) {
 			e.openvpnUpDesc,
 			prometheus.GaugeValue,
 			0.0,
-			fmt.Sprintf("%f", e.geoIP.Lat),
-			fmt.Sprintf("%f", e.geoIP.Lon),
+			e.geoIP.Geohash,
 			e.geoIP.City,
 			e.geoIP.CountryName,
 			e.geoIP.RegionName,
