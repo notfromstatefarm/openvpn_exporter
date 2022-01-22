@@ -37,18 +37,14 @@ type OpenVPNExporter struct {
 }
 
 type GeoIP struct {
-	Ip          string  `json:"ip"`
-	CountryCode string  `json:"country_code"`
-	CountryName string  `json:"country_name"`
-	RegionCode  string  `json:"region_code"`
-	RegionName  string  `json:"region_name"`
+	Ip          string  `json:"query"`
+	CountryName string  `json:"country"`
+	RegionName  string  `json:"regionName"`
 	City        string  `json:"city"`
-	Zipcode     string  `json:"zipcode"`
-	Lat         float64 `json:"latitude"`
-	Lon         float64 `json:"longitude"`
-	MetroCode   int     `json:"metro_code"`
-	AreaCode    int     `json:"area_code"`
+	Lat         float64 `json:"lat"`
+	Lon         float64 `json:"lon"`
 }
+
 var geoCache = map[string]GeoIP{}
 
 func getGeo(address string) (GeoIP, error) {
@@ -59,7 +55,7 @@ func getGeo(address string) (GeoIP, error) {
 
 	log.Printf("Resolving %s", address)
 
-	response, err := http.Get("https://freegeoip.live/json/" + address)
+	response, err := http.Get("http://ip-api.com/json/" + address)
 	if err != nil {
 		return geo, err
 	}
