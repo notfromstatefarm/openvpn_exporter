@@ -3,18 +3,17 @@ package exporters
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"io"
+	"io/ioutil"
 	"log"
+	"math"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"time"
-	"net/http"
-	"io/ioutil"
-	"encoding/json"
-	"math"
 )
 
 type OpenvpnServerHeader struct {
@@ -29,24 +28,24 @@ type OpenvpnServerHeaderField struct {
 }
 
 type OpenVPNExporter struct {
-	statusPaths                 []string
+	statusPath                 string
+	geoIP *GeoIP
 	openvpnUpDesc               *prometheus.Desc
 	openvpnStatusUpdateTimeDesc *prometheus.Desc
 	openvpnConnectedClientsDesc *prometheus.Desc
-	openvpnClientDescs          map[string]*prometheus.Desc
 	openvpnServerHeaders        map[string]OpenvpnServerHeader
 }
 
 type GeoIP struct {
-	Ip          string  `json:""`
+	Ip          string  `json:"ip"`
 	CountryCode string  `json:"country_code"`
 	CountryName string  `json:"country_name"`
 	RegionCode  string  `json:"region_code"`
 	RegionName  string  `json:"region_name"`
 	City        string  `json:"city"`
 	Zipcode     string  `json:"zipcode"`
-	Lat         float32 `json:"latitude"`
-	Lon         float32 `json:"longitude"`
+	Lat         float64 `json:"latitude"`
+	Lon         float64 `json:"longitude"`
 	MetroCode   int     `json:"metro_code"`
 	AreaCode    int     `json:"area_code"`
 }
@@ -81,78 +80,27 @@ func getGeo(address string) (GeoIP, error) {
 	return geo, nil
 }
 
-func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNExporter, error) {
+func NewOpenVPNExporter(statusPath string) (*OpenVPNExporter, error) {
 	// Metrics exported both for client and server statistics.
 	openvpnUpDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "up"),
 		"Whether scraping OpenVPN's metrics was successful.",
-		[]string{"status_path"}, nil)
+		[]string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
 	openvpnStatusUpdateTimeDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "status_update_time_seconds"),
 		"UNIX timestamp at which the OpenVPN statistics were updated.",
-		[]string{"status_path"}, nil)
+		[]string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
 
 	// Metrics specific to OpenVPN servers.
 	openvpnConnectedClientsDesc := prometheus.NewDesc(
 		prometheus.BuildFQName("openvpn", "", "server_connected_clients"),
 		"Number Of Connected Clients",
-		[]string{"status_path"}, nil)
+		[]string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"}, nil)
 
-	// Metrics specific to OpenVPN clients.
-	openvpnClientDescs := map[string]*prometheus.Desc{
-		"TUN/TAP read bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "tun_tap_read_bytes_total"),
-			"Total amount of TUN/TAP traffic read, in bytes.",
-			[]string{"status_path"}, nil),
-		"TUN/TAP write bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "tun_tap_write_bytes_total"),
-			"Total amount of TUN/TAP traffic written, in bytes.",
-			[]string{"status_path"}, nil),
-		"TCP/UDP read bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "tcp_udp_read_bytes_total"),
-			"Total amount of TCP/UDP traffic read, in bytes.",
-			[]string{"status_path"}, nil),
-		"TCP/UDP write bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "tcp_udp_write_bytes_total"),
-			"Total amount of TCP/UDP traffic written, in bytes.",
-			[]string{"status_path"}, nil),
-		"Auth read bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "auth_read_bytes_total"),
-			"Total amount of authentication traffic read, in bytes.",
-			[]string{"status_path"}, nil),
-		"pre-compress bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "pre_compress_bytes_total"),
-			"Total amount of data before compression, in bytes.",
-			[]string{"status_path"}, nil),
-		"post-compress bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "post_compress_bytes_total"),
-			"Total amount of data after compression, in bytes.",
-			[]string{"status_path"}, nil),
-		"pre-decompress bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "pre_decompress_bytes_total"),
-			"Total amount of data before decompression, in bytes.",
-			[]string{"status_path"}, nil),
-		"post-decompress bytes": prometheus.NewDesc(
-			prometheus.BuildFQName("openvpn", "client", "post_decompress_bytes_total"),
-			"Total amount of data after decompression, in bytes.",
-			[]string{"status_path"}, nil),
-	}
-
-	var serverHeaderClientLabels []string
-	var serverHeaderClientLabelColumns []string
-	var serverHeaderRoutingLabels []string
-	var serverHeaderRoutingLabelColumns []string
-	if ignoreIndividuals {
-		serverHeaderClientLabels = []string{"status_path", "common_name"}
-		serverHeaderClientLabelColumns = []string{"Common Name"}
-		serverHeaderRoutingLabels = []string{"status_path", "common_name"}
-		serverHeaderRoutingLabelColumns = []string{"Common Name"}
-	} else {
-		serverHeaderClientLabels = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
-		serverHeaderClientLabelColumns = []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
-		serverHeaderRoutingLabels = []string{"status_path", "common_name", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
-		serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
-	}
+	serverHeaderClientLabels := []string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip", "common_name", "connection_time", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
+	serverHeaderClientLabelColumns := []string{"Common Name", "Connected Since (time_t)", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
+	serverHeaderRoutingLabels := []string{"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip", "common_name", "real_address", "virtual_address", "username", "lat", "lon", "city", "country", "region"}
+	serverHeaderRoutingLabelColumns := []string{"Common Name", "Real Address", "Virtual Address", "Username", "Latitude", "Longitude", "City", "Country", "Region"}
 
 	openvpnServerHeaders := map[string]OpenvpnServerHeader{
 		"CLIENT_LIST": {
@@ -178,7 +126,7 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNE
 					Column: "Distance From Server",
 					Desc: prometheus.NewDesc(
 						prometheus.BuildFQName("openvpn", "server", "client_distance"),
-						"Distance from server to client in kilometers",
+						"Distance from server to client, in meters",
 						serverHeaderClientLabels, nil),
 					ValueType: prometheus.GaugeValue,
 				},
@@ -199,12 +147,16 @@ func NewOpenVPNExporter(statusPaths []string, ignoreIndividuals bool) (*OpenVPNE
 		},
 	}
 
+	geo, err := getGeo("")
+	if err != nil {
+		log.Printf("Error getting server geo %v", err)
+	}
 	return &OpenVPNExporter{
-		statusPaths:                 statusPaths,
+		statusPath:                 statusPath,
+		geoIP: &geo,
 		openvpnUpDesc:               openvpnUpDesc,
 		openvpnStatusUpdateTimeDesc: openvpnStatusUpdateTimeDesc,
 		openvpnConnectedClientsDesc: openvpnConnectedClientsDesc,
-		openvpnClientDescs:          openvpnClientDescs,
 		openvpnServerHeaders:        openvpnServerHeaders,
 	}, nil
 }
@@ -218,22 +170,40 @@ func (e *OpenVPNExporter) collectStatusFromReader(statusPath string, file io.Rea
 	buf, _ := reader.Peek(18)
 	if bytes.HasPrefix(buf, []byte("TITLE,")) {
 		// Server statistics, using format version 2.
-		return e.collectServerStatusFromReader(statusPath, reader, ch, ",")
+		return e.collectServerStatusFromReader(reader, ch, ",")
 	} else if bytes.HasPrefix(buf, []byte("TITLE\t")) {
 		// Server statistics, using format version 3. The only
 		// difference compared to version 2 is that it uses tabs
 		// instead of spaces.
-		return e.collectServerStatusFromReader(statusPath, reader, ch, "\t")
+		return e.collectServerStatusFromReader(reader, ch, "\t")
 	} else if bytes.HasPrefix(buf, []byte("OpenVPN STATISTICS")) {
 		// Client statistics.
-		return e.collectClientStatusFromReader(statusPath, reader, ch)
+		return fmt.Errorf("client status not supported in this fork")
 	} else {
 		return fmt.Errorf("unexpected file contents: %q", buf)
 	}
 }
 
+func hsin(theta float64) float64 {
+	return math.Pow(math.Sin(theta/2), 2)
+}
+
+func distance(lat1, lon1, lat2, lon2 float64) float64 {
+	var la1, lo1, la2, lo2, r float64
+	la1 = lat1 * math.Pi / 180
+	lo1 = lon1 * math.Pi / 180
+	la2 = lat2 * math.Pi / 180
+	lo2 = lon2 * math.Pi / 180
+
+	r = 6378100 // Earth radius in METERS
+
+	h := hsin(la2-la1) + math.Cos(la1)*math.Cos(la2)*hsin(lo2-lo1)
+
+	return 2 * r * math.Asin(math.Sqrt(h))
+}
+
 // Converts OpenVPN server status information into Prometheus metrics.
-func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file io.Reader, ch chan<- prometheus.Metric, separator string) error {
+func (e *OpenVPNExporter) collectServerStatusFromReader(file io.Reader, ch chan<- prometheus.Metric, separator string) error {
 	scanner := bufio.NewScanner(file)
 	scanner.Split(bufio.ScanLines)
 	headersFound := map[string][]string{}
@@ -261,7 +231,12 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 				e.openvpnStatusUpdateTimeDesc,
 				prometheus.GaugeValue,
 				timeStartStats,
-				statusPath)
+				fmt.Sprintf("%f", e.geoIP.Lat),
+				fmt.Sprintf("%f", e.geoIP.Lon),
+				e.geoIP.City,
+				e.geoIP.CountryName,
+				e.geoIP.RegionName,
+				e.geoIP.Ip)
 		} else if fields[0] == "TITLE" && len(fields) == 2 {
 			// OpenVPN version number.
 		} else if header, ok := e.openvpnServerHeaders[fields[0]]; ok {
@@ -310,30 +285,24 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 					} else {
 						columnValues["Country"] = "Unknown"
 					}
-					// calculate distance
-					// get our geo (blank returns our info)
-					serverGeo, err := getGeo("")
-					if err != nil {
-						log.Printf("Error resolving server GeoIP: %v", err)
+					if e.geoIP.Lon == 0 && e.geoIP.Lat == 0 {
+						// don't bother calculating, geoIP didn't resolve
+						columnValues["Distance From Server"] = "0"
 					} else {
-						p := math.Pi / 180
-						clientLat := float64(geo.Lat)
-						clientLon := float64(geo.Lon)
-						serverLat := float64(serverGeo.Lat)
-						serverLon := float64(serverGeo.Lon)
-
-						var a = 0.5 - math.Cos((serverLat - clientLat) * p)/2 + 
-								math.Cos(clientLat * p) * math.Cos(serverLat * p) * 
-								(1 - math.Cos((serverLon - clientLon) * p))/2;
-						
-						distance := 12742 * math.Asin(math.Sqrt(a));
-						columnValues["Distance From Server"] = fmt.Sprintf("%f", distance)
+						d := distance(geo.Lat, geo.Lon, e.geoIP.Lat, e.geoIP.Lon)
+						columnValues["Distance From Server"] = fmt.Sprintf("%f", d)
 					}
+
 				}
 			}
 
 			// Extract columns that should act as entry labels.
-			labels := []string{statusPath}
+			labels := []string{fmt.Sprintf("%f", e.geoIP.Lat),
+				fmt.Sprintf("%f", e.geoIP.Lon),
+				e.geoIP.City,
+				e.geoIP.CountryName,
+				e.geoIP.RegionName,
+				e.geoIP.Ip}
 			for _, column := range header.LabelColumns {
 				labels = append(labels, columnValues[column])
 			}
@@ -367,7 +336,12 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 		e.openvpnConnectedClientsDesc,
 		prometheus.GaugeValue,
 		float64(numberConnectedClient),
-		statusPath)
+		fmt.Sprintf("%f", e.geoIP.Lat),
+		fmt.Sprintf("%f", e.geoIP.Lon),
+		e.geoIP.City,
+		e.geoIP.CountryName,
+		e.geoIP.RegionName,
+		e.geoIP.Ip)
 	return scanner.Err()
 }
 
@@ -392,46 +366,6 @@ func subslice(sub []string, main []string) bool {
 	return true
 }
 
-// Converts OpenVPN client status information into Prometheus metrics.
-func (e *OpenVPNExporter) collectClientStatusFromReader(statusPath string, file io.Reader, ch chan<- prometheus.Metric) error {
-	scanner := bufio.NewScanner(file)
-	scanner.Split(bufio.ScanLines)
-	for scanner.Scan() {
-		fields := strings.Split(scanner.Text(), ",")
-		if fields[0] == "END" && len(fields) == 1 {
-			// Stats footer.
-		} else if fields[0] == "OpenVPN STATISTICS" && len(fields) == 1 {
-			// Stats header.
-		} else if fields[0] == "Updated" && len(fields) == 2 {
-			// Time at which the statistics were updated.
-			location, _ := time.LoadLocation("Local")
-			timeParser, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", fields[1], location)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(
-				e.openvpnStatusUpdateTimeDesc,
-				prometheus.GaugeValue,
-				float64(timeParser.Unix()),
-				statusPath)
-		} else if desc, ok := e.openvpnClientDescs[fields[0]]; ok && len(fields) == 2 {
-			// Traffic counters.
-			value, err := strconv.ParseFloat(fields[1], 64)
-			if err != nil {
-				return err
-			}
-			ch <- prometheus.MustNewConstMetric(
-				desc,
-				prometheus.CounterValue,
-				value,
-				statusPath)
-		} else {
-			return fmt.Errorf("unsupported key: %q", fields[0])
-		}
-	}
-	return scanner.Err()
-}
-
 func (e *OpenVPNExporter) collectStatusFromFile(statusPath string, ch chan<- prometheus.Metric) error {
 	conn, err := os.Open(statusPath)
 	defer conn.Close()
@@ -446,21 +380,30 @@ func (e *OpenVPNExporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *OpenVPNExporter) Collect(ch chan<- prometheus.Metric) {
-	for _, statusPath := range e.statusPaths {
-		err := e.collectStatusFromFile(statusPath, ch)
-		if err == nil {
-			ch <- prometheus.MustNewConstMetric(
-				e.openvpnUpDesc,
-				prometheus.GaugeValue,
-				1.0,
-				statusPath)
-		} else {
-			log.Printf("Failed to scrape showq socket: %s", err)
-			ch <- prometheus.MustNewConstMetric(
-				e.openvpnUpDesc,
-				prometheus.GaugeValue,
-				0.0,
-				statusPath)
-		}
+	err := e.collectStatusFromFile(e.statusPath, ch)
+	//"server_lat", "server_lon", "server_city", "server_country", "server_region", "server_public_ip"
+	if err == nil {
+		ch <- prometheus.MustNewConstMetric(
+			e.openvpnUpDesc,
+			prometheus.GaugeValue,
+			1.0,
+			fmt.Sprintf("%f", e.geoIP.Lat),
+			fmt.Sprintf("%f", e.geoIP.Lon),
+			e.geoIP.City,
+			e.geoIP.CountryName,
+			e.geoIP.RegionName,
+			e.geoIP.Ip)
+	} else {
+		log.Printf("Failed to scrape showq socket: %s", err)
+		ch <- prometheus.MustNewConstMetric(
+			e.openvpnUpDesc,
+			prometheus.GaugeValue,
+			0.0,
+			fmt.Sprintf("%f", e.geoIP.Lat),
+			fmt.Sprintf("%f", e.geoIP.Lon),
+			e.geoIP.City,
+			e.geoIP.CountryName,
+			e.geoIP.RegionName,
+			e.geoIP.Ip)
 	}
 }
