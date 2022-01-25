@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/mmcloughlin/geohash"
 	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"io/ioutil"
@@ -14,7 +15,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"github.com/mmcloughlin/geohash"
 )
 
 type OpenvpnServerHeader struct {
@@ -239,9 +239,6 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(file io.Reader, ch chan<
 		} else if fields[0] == "TITLE" && len(fields) == 2 {
 			// OpenVPN version number.
 		} else if header, ok := e.openvpnServerHeaders[fields[0]]; ok {
-			if fields[0] == "CLIENT_LIST" {
-				numberConnectedClient++
-			}
 			// Entry that depends on a preceding HEADERS directive.
 			columnNames, ok := headersFound[fields[0]]
 			if !ok {
@@ -260,6 +257,13 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(file io.Reader, ch chan<
 				columnValues[column] = fields[i+1]
 			}
 
+			if columnValues["Common Name"] == "UNDEF" || columnValues["Common Name"] == "" {
+				continue // skip this 'client'
+			}
+
+			if fields[0] == "CLIENT_LIST" {
+				numberConnectedClient++
+			}
 
 			if columnValues["Real Address"] != "" {
 				ip := strings.Split(columnValues["Real Address"], ":")[0]
